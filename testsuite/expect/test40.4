@@ -1,0 +1,221 @@
+#!/usr/bin/env expect
+############################################################################
+# Purpose:  Test of Slurm functionality
+#           Test MPS resource limits with various allocation options
+#
+# Requires: AccountingStorageEnforce=limits
+#           AccountingStorageTRES=gres/mps
+#           SelectType=select/cons_tres
+#           Administrator permissions
+############################################################################
+# Copyright (C) 2018 SchedMD LLC
+# Written by Morris Jette
+#
+# This file is part of Slurm, a resource management program.
+# For details, see <https://slurm.schedmd.com/>.
+# Please also read the included file: DISCLAIMER.
+#
+# Slurm is free software; you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free
+# Software Foundation; either version 2 of the License, or (at your option)
+# any later version.
+#
+# Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+# details.
+#
+# You should have received a copy of the GNU General Public License along
+# with Slurm; if not, write to the Free Software Foundation, Inc.,
+# 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA.
+############################################################################
+source ./globals
+source ./globals_accounting
+
+set acct           "test$test_id\_acct"
+set cluster        [get_cluster_name]
+set exit_code      0
+set file_in        "test$test_id.input"
+set file_out1      "test$test_id.output1"
+set file_out2      "test$test_id.output2"
+set user           [get_my_user_name]
+
+proc setup { mps_limit } {
+	global acct cluster exit_code user
+
+	set acct_req(cluster) $cluster
+	set acct_req(parent)  "root"
+	set acct_req(maxtres) "gres/mps=$mps_limit"
+
+	set user_req(cluster) $cluster
+	set user_req(account) $acct
+
+	if { [add_acct $acct [array get acct_req]] } {
+		log_error "Child account was not added"
+		incr exit_code
+		return 1
+	}
+
+	if { [add_user $user [array get user_req]] } {
+		log_error "User was not added to child account"
+		incr exit_code
+		return 1
+	}
+
+	return 0
+}
+
+proc cleanup { } {
+	global acct
+
+	remove_acct "" $acct
+}
+
+set store_tres [string tolower [get_acct_store_tres]]
+set store_mps [string first "gres/mps:" $store_tres]
+if {$store_mps != -1} {
+	skip "This test requires homogeneous MPS accounting (NO Type)"
+}
+set store_mps [string first "gres/mps" $store_tres]
+if {$store_mps == -1} {
+	skip "This test requires accounting for MPS"
+} elseif { [test_using_slurmdbd] == 0 } {
+	skip "This test can't be run without AccountStorageType=slurmdbd"
+} elseif { [test_enforce_limits] == 0 } {
+	skip "This test can't be run without AccountingStorageEnforce=limits"
+} elseif {[test_front_end]} {
+	skip "This test is incompatible with front-end systems"
+} elseif {[string compare [check_accounting_admin_level] "Administrator"]} {
+	skip "This test can't be run without being an Accounting administrator"
+}
+
+if {[test_cons_tres]} {
+	log_debug "Valid configuration, using select/cons_tres"
+} else {
+	skip "This test is only compatible with select/cons_tres"
+}
+
+set nb_nodes [get_node_cnt_in_part]
+log_debug "Default partition node count is $nb_nodes"
+if {$nb_nodes > 1} {
+	set nb_nodes 2
+}
+set mps_cnt [get_highest_mps_count $nb_nodes]
+if {$mps_cnt < 0} {
+	fail "Error getting MPS count"
+}
+if {$mps_cnt < 100} {
+	skip "This test requires 100 or more MPS per gpu in the default partition"
+}
+log_debug "MPS count is $mps_cnt"
+
+# Remove any vestigial test account
+cleanup
+
+# Add parent account (off root)
+set mps_limit [expr $mps_cnt * $nb_nodes]
+if {$mps_limit > 8} {
+	set mps_limit 50
+} else {
+	incr mps_limit -1
+}
+if {[setup $mps_limit]} {
+	fail "Failure in setup ($mps_limit)"
+}
+
+make_bash_script $file_in "
+	$scontrol -dd show job \${SLURM_JOBID} | grep mps
+	exit 0"
+
+#
+# Test --gres=mps option by job (first job over limit, second job under limit)
+#
+log_info "TEST 1: --gres=mps option by job (first job over limit, second job under limit)"
+
+set timeout $max_job_delay
+exec $bin_rm -f $file_out1  $file_out2
+set mps_good_cnt [expr ($mps_limit + $nb_nodes - 1) / $nb_nodes]
+if {$nb_nodes == 1} {
+	set mps_fail_cnt [expr $mps_limit + 1]
+} else {
+	set mps_fail_cnt [expr $mps_good_cnt + 1]
+}
+set job_id1 0
+spawn $sbatch --account=$acct --gres=craynetwork:0 --gres=mps:$mps_fail_cnt -N$nb_nodes -t1 -o $file_out1 -J "test$test_id" ./$file_in
+expect {
+	-re "Submitted batch job ($number)" {
+		set job_id1 $expect_out(1,string)
+		exp_continue
+	}
+	timeout {
+		log_error "sbatch not responding"
+		set exit_code 1
+	}
+	eof {
+		wait
+	}
+}
+if {$job_id1 == 0} {
+	log_error "Job not submitted"
+	set exit_code 1
+}
+
+set job_id2 0
+spawn $sbatch --account=$acct --gres=craynetwork:0 --gres=mps:$mps_good_cnt -N$nb_nodes -t1 -o $file_out2 -J "test$test_id" ./$file_in
+expect {
+	-re "Submitted batch job ($number)" {
+		set job_id2 $expect_out(1,string)
+		exp_continue
+	}
+	timeout {
+		log_error "sbatch not responding"
+		set exit_code 1
+	}
+	eof {
+		wait
+	}
+}
+if {$job_id2 == 0} {
+	log_error "Job not submitted"
+	set exit_code 1
+}
+
+if {[wait_for_job $job_id2 "DONE"] != 0} {
+	log_error "Job $job_id2 did not complete"
+	cancel_job $job_id2
+	set exit_code 1
+}
+
+set match 0
+spawn $scontrol show job $job_id1
+expect {
+	-re "JobState=PENDING" {
+		incr match
+		exp_continue
+	}
+	-re "Reason=.*AssocMaxGRESPerJob" {
+		incr match
+		exp_continue
+	}
+	timeout {
+		log_error "scontrol not responding"
+		set exit_code 1
+	}
+	eof {
+		wait
+	}
+}
+if {$match != 2} {
+	log_error "Job $job_id1 state is bad"
+	set exit_code 1
+}
+cancel_job $job_id1
+if {$exit_code != 0} {
+	fail "Unable to cancel job ($job_id1)"
+}
+
+if {$exit_code == 0} {
+	exec $bin_rm -f $file_in $file_out1 $file_out2
+} else {
+	fail "Test failed due to previous errors (\$exit_code = $exit_code)"
+}

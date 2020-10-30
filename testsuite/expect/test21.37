@@ -1,0 +1,81 @@
+#!/usr/bin/env expect
+############################################################################
+# Purpose: Test of Slurm functionality
+#          sacctmgr show stats
+############################################################################
+# Copyright (C) 2008-2010 Lawrence Livermore National Security.
+# Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
+# Written by Joseph Donaghy <donaghy1@llnl.gov>
+# CODE-OCEC-09-009. All rights reserved.
+#
+# This file is part of Slurm, a resource management program.
+# For details, see <https://slurm.schedmd.com/>.
+# Please also read the included file: DISCLAIMER.
+#
+# Slurm is free software; you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free
+# Software Foundation; either version 2 of the License, or (at your option)
+# any later version.
+#
+# Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+# details.
+#
+# You should have received a copy of the GNU General Public License along
+# with Slurm; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+############################################################################
+source ./globals
+
+set exit_code   0
+
+if {[test_using_slurmdbd] == 0} {
+	skip "This test can't be run without AccountStorageType=slurmdbd"
+}
+if { [string compare [check_accounting_admin_level] "Administrator"] } {
+	skip "This test can't be run without being an Accounting administrator.\nUse: sacctmgr mod user \$USER set admin=admin"
+}
+
+set matches 0
+set rpc_rec_cnt 0
+set as_pid [spawn $sacctmgr show stats]
+expect {
+	-re "sacctmgr show stats" {
+		incr matches
+		exp_continue
+	}
+	-re "Remote Procedure Call statistics by message type" {
+		incr matches
+		exp_continue
+	}
+	-re "DBD_FINI" {
+		incr matches
+		exp_continue
+	}
+	-re "Remote Procedure Call statistics by user" {
+		incr matches
+		exp_continue
+	}
+	-re "count:$number *ave_time:$number *total_time:$number" {
+		incr rpc_rec_cnt
+		exp_continue
+	}
+	timeout {
+		log_error "sacctmgr show stats not responding"
+		set exit_code 1
+		slow_kill $as_pid
+	}
+	eof {
+		wait
+	}
+}
+
+if {$rpc_rec_cnt > 0} {
+	incr matches
+}
+assert_or_fail {$matches == 5} "sacctmgr show stats response bad ($matches != 5)"
+
+if {$exit_code != 0} {
+	fail "Test failed due to previous errors (\$exit_code = $exit_code)"
+}

@@ -1,0 +1,65 @@
+#!/usr/bin/env expect
+############################################################################
+# Purpose: Test of Slurm functionality
+#          validate smd show config command
+############################################################################
+# Copyright (C) 2011-2014 SchedMD LLC
+# Written by Nathan Yee <nyee32@schedmd.com>
+# All rights reserved
+############################################################################
+source ./globals
+
+set exit_code  0
+
+if {![slurmctld_plug_stack_nonstop]} {
+	skip "This test is only compatible when SlurmctldPlugstack includes nonstop"
+}
+
+#
+# Test the smd show config command
+#
+set match 0
+spawn $smd -c
+expect {
+	-re "System Configuration:" {
+		incr match
+		exp_continue
+	}
+	timeout {
+		log_error "smd is not responding"
+		set exit_code 1
+	}
+	eof {
+		wait
+	}
+}
+
+#
+# Use verbose on the -c option
+#
+set match 0
+spawn $smd -c -v
+expect {
+	-re "Reading configuration" {
+		incr match
+		exp_continue
+	}
+	-re "System Configuration:" {
+		incr match
+		exp_continue
+	}
+	timeout {
+		log_error "smd is not responding"
+		set exit_code 1
+	}
+	eof {
+		wait
+	}
+}
+if {$match != 2} {
+	fail "smd show config failed"
+}
+
+if {$exit_code != 0} {
+	fail "Test failed due to previous errors (\$exit_code = $exit_code)"
+}

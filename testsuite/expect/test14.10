@@ -1,0 +1,149 @@
+#!/usr/bin/env expect
+############################################################################
+# Purpose: Test of Slurm functionality
+#          Validate sbcast for a job step allocation (subset of job allocation).
+############################################################################
+# Copyright (C) 2015 SchedMD LLC
+# Written by Nathan Yee <nyee32@schedmd.com>
+#
+# This file is part of Slurm, a resource management program.
+# For details, see <https://slurm.schedmd.com/>.
+# Please also read the included file: DISCLAIMER.
+#
+# Slurm is free software; you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free
+# Software Foundation; either version 2 of the License, or (at your option)
+# any later version.
+#
+# Slurm is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+# details.
+#
+# You should have received a copy of the GNU General Public License along
+# with Slurm; if not, write to the Free Software Foundation, Inc.
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
+############################################################################
+source ./globals
+
+set file_in1   "test$test_id.in1"
+set file_in2   "test$test_id.in2"
+set exit_code  0
+set job_id     0
+set hostlist   ""
+set node1      ""
+set node2      ""
+
+if {![test_accting_steps]} {
+	skip "This test can not be run with nosteps or nojobs (AccountingStorageEnforce)"
+}
+if {[test_front_end] != 0} {
+	skip "This test is incompatible with front-end systems"
+} elseif {[slurmd_user_root] == 0} {
+	skip "This test requires that the SlurmdUser be root"
+} elseif {[get_node_cnt] < 2} {
+	skip "This test requires that the configuration has at least 2 nodes"
+}
+
+spawn $bin_bash -c "exec $scontrol show hostnames \$($sinfo -tidle -h -o%N) | head -n2 |tr \'\n\' ' ' "
+expect {
+	-re "($re_word_str) ($re_word_str)" {
+		set node1 $expect_out(1,string)
+		set node2 $expect_out(2,string)
+		exp_continue
+	}
+	timeout {
+		log_error "sinfo is not responding"
+		set exit_code 1
+	}
+	eof {
+		wait
+	}
+}
+if {![string compare $node1 ""] || ![string compare $node2 ""]} {
+	skip "Did not find at least 2 idle nodes"
+}
+
+set hostlist "$node1,$node2"
+
+
+make_bash_script $file_in1 "
+$srun $bin_rm -f /tmp/$node1/test$test_id\_file
+$srun $bin_rm -fr /tmp/$node1
+$srun $bin_rm -f /tmp/$node2/test$test_id\_file
+$srun $bin_rm -fr /tmp/$node2
+
+$srun -N1 -n1 -w$node1 mkdir /tmp/$node1
+$srun -N1 -n1 -w$node2 mkdir /tmp/$node2
+
+$srun -N1 -n1 -w$node2 ./$file_in2
+
+echo -n \"Checking node 1: \"
+$srun -Q -N1 -n1 -w$node2 ls /tmp/$node2/test$test_id\_file
+
+echo -n \"Checking node 0: \"
+$srun -Q -N1 -n1 -w$node1 ls /tmp/$node1/test$test_id\_file
+
+$srun $bin_rm -f /tmp/$node1/test$test_id\_file
+$srun $bin_rm -fr /tmp/$node1
+$srun $bin_rm -f /tmp/$node2/test$test_id\_file
+$srun $bin_rm -fr /tmp/$node2
+"
+
+make_bash_script $file_in2 "
+$sbcast -f -j\$SLURM_JOBID.\$SLURM_STEPID $srun /tmp/\$SLURMD_NODENAME/test$test_id\_file
+"
+
+# Make allocations
+set timeout $max_job_delay
+set matches 0
+spawn $salloc -N2 -w$hostlist -t1 ./$file_in1
+expect {
+	-re "Permission denied" {
+		fail "Unable to delete/create file, check permissions"
+	}
+	-re "(configuration is not available|Unable to submit batch job|Node count specification invalid|More processors requested than permitted)" {
+		exec $bin_rm -rf $file_in1 $file_in2
+		skip "Can't run this test"
+	}
+	-re "cannot create directory" {
+		log_debug "This error is expected when nodes share the same tmp directory"
+		exp_continue
+	}
+	-re "Granted job allocation ($number)" {
+		set job_id $expect_out(1,string)
+		exp_continue
+	}
+	-re "Checking node 1: */tmp/$node2/test$test_id\_file" {
+		incr matches
+		exp_continue
+	}
+	-re "Checking node 0: */tmp/$node1/test$test_id\_file" {
+		set matches -999
+		exp_continue
+	}
+	-re "Checking node 0: .*No such" {
+		log_debug "This error is expected"
+		incr matches
+		exp_continue
+	}
+	timeout {
+		log_error "salloc is not responding"
+		set exit_code 1
+	}
+	eof {
+		wait
+	}
+}
+if {$job_id == 0} {
+	fail "Test job submission failed"
+}
+if {$matches != 2} {
+	fail "sbcast did not copy the file to the correct nodes ($matches != 2)"
+}
+
+if {$exit_code == 0} {
+	exec $bin_rm -rf $file_in1 $file_in2
+} else {
+	fail "Test failed due to previous errors (\$exit_code = $exit_code)"
+}
